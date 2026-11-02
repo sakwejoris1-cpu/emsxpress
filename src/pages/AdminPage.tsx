@@ -6,7 +6,8 @@ import './admin.css'
 
 type EventRow = { id: string; status: string; location: string; facility: string | null; description: string; latitude: number | null; longitude: number | null; timestamp: string }
 type ShipmentRow = {
-  trackingNumber: string; serviceType: string; status: string; senderName: string; senderCity: string; senderCountry: string
+  trackingNumber: string; serviceType: string; status: string; senderName: string; senderAddress: string; senderCity: string; senderCountry: string
+  receiverAddress: string
   senderLatitude: number | null; senderLongitude: number | null; receiverName: string; receiverCity: string; receiverCountry: string
   receiverLatitude: number | null; receiverLongitude: number | null; weightKg: number; estimatedDelivery: string | null
   signedBy: string | null; deliveredAt: string | null; updatedAt: string; events: EventRow[]
@@ -16,6 +17,7 @@ const statuses = ['LABEL_CREATED', 'COLLECTED', 'ORIGIN_GATEWAY', 'IN_TRANSIT', 
 const services = ['EXPRESS_INTL', 'STANDARD_INTL', 'CARGO_FREIGHT', 'ECOMMERCE', 'BUSINESS_LOGISTICS', 'DOOR_TO_DOOR']
 const label = (value: string) => value.toLowerCase().replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase())
 const mapSrc = (lat: number, lon: number) => `https://www.openstreetmap.org/export/embed.html?bbox=${lon - 0.55}%2C${lat - 0.35}%2C${lon + 0.55}%2C${lat + 0.35}&layer=mapnik&marker=${lat}%2C${lon}`
+const addressMapSrc = (origin: string, destination: string) => `https://maps.google.com/maps?saddr=${encodeURIComponent(origin)}&daddr=${encodeURIComponent(destination)}&output=embed`
 const numberOrUndefined = (value: string) => value.trim() === '' ? undefined : Number(value)
 
 const blankShipment = {
@@ -212,6 +214,8 @@ export default function AdminPage() {
   const latest = selected?.events[0]
   const mapLatitude = latest?.latitude ?? selected?.senderLatitude
   const mapLongitude = latest?.longitude ?? selected?.senderLongitude
+  const originAddress = selected ? [selected.senderAddress, selected.senderCity, selected.senderCountry].filter(Boolean).join(', ') : ''
+  const destinationAddress = selected ? [selected.receiverAddress, selected.receiverCity, selected.receiverCountry].filter(Boolean).join(', ') : ''
 
   return <PageFrame eyebrow="EMSXPRESS ADMIN" title={<>Operations,<br/><span>at a glance.</span></>} description="Manage your shipment records and publish scan updates to customer tracking.">
     <div className="admin-toolbar"><div className="admin-live"><i/> Admin session active <span>·</span> Data refreshes every 30 seconds</div><div><a className="admin-toolbar-link" href="/">Public site <ArrowRight size={14}/></a><button className="admin-toolbar-button" onClick={() => loadShipments().catch(cause => setError(cause.message))}><RefreshCw size={14}/> Refresh</button><button className="admin-toolbar-button" onClick={signOut}><LogOut size={14}/> Sign out</button></div></div>
@@ -229,16 +233,16 @@ export default function AdminPage() {
       <section className="admin-shipments portal-panel">
         <div className="admin-panel-heading"><div><span className="eyebrow"><span className="eyebrow-icon"><Activity size={14}/></span> SHIPMENT CONTROL</span><h2>All shipments <span>{total}</span></h2></div><button className="button button-accent small" onClick={() => { setShowCreate(value => !value); setError('') }}><Plus size={15}/>{showCreate ? 'Close form' : 'New shipment'}</button></div>
         {showCreate && <form className="admin-create" onSubmit={createShipment}>
-          <div className="admin-form-title"><b>Create shipment</b><small>Creates a shipment and initial label scan.</small></div>
+          <div className="admin-form-title"><b>Create shipment</b><small>Sender and receiver addresses are required. Map coordinates are optional.</small></div>
           <div className="admin-form-grid">
             <label>TRACKING NUMBER<input required minLength={6} value={shipmentForm.trackingNumber} onChange={e => setShipmentForm({ ...shipmentForm, trackingNumber: e.target.value })} placeholder="Enter a tracking number"/></label>
             <label>SERVICE<select value={shipmentForm.serviceType} onChange={e => setShipmentForm({ ...shipmentForm, serviceType: e.target.value })}>{services.map(value => <option key={value} value={value}>{label(value)}</option>)}</select></label>
             <label>SENDER NAME<input required value={shipmentForm.senderName} onChange={e => setShipmentForm({ ...shipmentForm, senderName: e.target.value })}/></label>
-            <label>SENDER ADDRESS<input required value={shipmentForm.senderAddress} onChange={e => setShipmentForm({ ...shipmentForm, senderAddress: e.target.value })}/></label>
+            <label>SENDER ADDRESS (REQUIRED)<input required value={shipmentForm.senderAddress} onChange={e => setShipmentForm({ ...shipmentForm, senderAddress: e.target.value })}/></label>
             <label>ORIGIN CITY<input required value={shipmentForm.senderCity} onChange={e => setShipmentForm({ ...shipmentForm, senderCity: e.target.value })}/></label>
             <label>ORIGIN COUNTRY<input required value={shipmentForm.senderCountry} onChange={e => setShipmentForm({ ...shipmentForm, senderCountry: e.target.value })}/></label>
             <label>RECEIVER NAME<input required value={shipmentForm.receiverName} onChange={e => setShipmentForm({ ...shipmentForm, receiverName: e.target.value })}/></label>
-            <label>RECEIVER ADDRESS<input required value={shipmentForm.receiverAddress} onChange={e => setShipmentForm({ ...shipmentForm, receiverAddress: e.target.value })}/></label>
+            <label>RECEIVER ADDRESS (REQUIRED)<input required value={shipmentForm.receiverAddress} onChange={e => setShipmentForm({ ...shipmentForm, receiverAddress: e.target.value })}/></label>
             <label>DESTINATION CITY<input required value={shipmentForm.receiverCity} onChange={e => setShipmentForm({ ...shipmentForm, receiverCity: e.target.value })}/></label>
             <label>DESTINATION COUNTRY<input required value={shipmentForm.receiverCountry} onChange={e => setShipmentForm({ ...shipmentForm, receiverCountry: e.target.value })}/></label>
             <label>WEIGHT (KG)<input required type="number" min="0.01" step="0.01" value={shipmentForm.weightKg} onChange={e => setShipmentForm({ ...shipmentForm, weightKg: e.target.value })}/></label>
@@ -256,7 +260,7 @@ export default function AdminPage() {
         {!selected ? <div className="admin-empty-detail"><Box size={25}/><b>Select a shipment</b><span>Shipment details and scan controls will appear here.</span></div> : <>
           <div className="admin-detail-head"><span className={`status-pill status-${selected.status.toLowerCase()}`}><i/>{label(selected.status)}</span><h2>{selected.trackingNumber}</h2><p>{label(selected.serviceType)} · {selected.weightKg} kg</p></div>
           <div className="admin-route"><div><small>ORIGIN</small><b>{selected.senderCity}</b><span>{selected.senderCountry}</span></div><ArrowRight size={16}/><div><small>DESTINATION</small><b>{selected.receiverCity}</b><span>{selected.receiverCountry}</span></div></div>
-          <section className="admin-detail-map"><div className="admin-subhead"><b><MapPin size={14}/> Latest scan location</b><small>Scan-based</small></div>{mapLatitude != null && mapLongitude != null ? <iframe title={`Latest scan map for ${selected.trackingNumber}`} loading="lazy" src={mapSrc(mapLatitude, mapLongitude)}/> : <div className="admin-map-empty">Add scan coordinates to show a map location.</div>}<span>{latest?.location ?? `${selected.senderCity}, ${selected.senderCountry}`}</span></section>
+          <section className="admin-detail-map"><div className="admin-subhead"><b><MapPin size={14}/> {mapLatitude != null && mapLongitude != null ? 'Latest scan location' : 'Shipment route'}</b><small>{mapLatitude != null && mapLongitude != null ? 'Scan-based' : 'Address-based map'}</small></div>{mapLatitude != null && mapLongitude != null ? <iframe title={`Latest scan map for ${selected.trackingNumber}`} loading="lazy" src={mapSrc(mapLatitude, mapLongitude)}/> : originAddress && destinationAddress ? <iframe title={`Shipment route map for ${selected.trackingNumber}`} loading="lazy" src={addressMapSrc(originAddress, destinationAddress)}/> : <div className="admin-map-empty">Add addresses or scan coordinates to show a map location.</div>}<span>{mapLatitude != null && mapLongitude != null ? latest?.location ?? `${selected.senderCity}, ${selected.senderCountry}` : `${originAddress} → ${destinationAddress}`}</span></section>
           <section className="admin-location-share"><div className="admin-subhead"><b><MapPin size={14}/> Live vehicle location</b><small>{sharingLocation ? 'Sharing' : 'On demand'}</small></div><p>Use a dispatcher or driver phone. Allow location access and keep this admin page open; customers see updates on their tracking page.</p>{locationMessage && <small className="admin-location-message">{locationMessage}</small>}{sharingLocation ? <button type="button" className="admin-toolbar-button stop-sharing" onClick={stopLocationSharing}>Stop location sharing</button> : <button type="button" className="button button-accent small" disabled={selected.status === 'DELIVERED'} onClick={startLocationSharing}>{selected.status === 'DELIVERED' ? 'Shipment delivered' : 'Start live location'}</button>}</section>
           <form className="admin-scan-form" onSubmit={addScan}><div className="admin-subhead"><b><Activity size={14}/> Publish tracking update</b><small>Creates a timestamped scan</small></div>
             <label>NEW STATUS<select required value={scan.status} onChange={e => setScan({ ...scan, status: e.target.value })}>{statuses.map(status => <option key={status} value={status}>{label(status)}</option>)}</select></label>

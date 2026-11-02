@@ -36,7 +36,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         prisma.shipment.findMany({
           orderBy: { updatedAt: 'desc' }, take: 250,
           select: {
-            trackingNumber: true, serviceType: true, status: true, senderName: true,
+            trackingNumber: true, serviceType: true, status: true, senderName: true, senderAddress: true, receiverAddress: true,
             senderCity: true, senderCountry: true, senderLatitude: true, senderLongitude: true,
             receiverName: true, receiverCity: true, receiverCountry: true, receiverLatitude: true, receiverLongitude: true,
             weightKg: true, estimatedDelivery: true, signedBy: true, deliveredAt: true, updatedAt: true,

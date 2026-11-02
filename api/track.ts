@@ -15,7 +15,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       where: { trackingNumber: { in: parsed.data } },
       select: {
         trackingNumber: true, serviceType: true, status: true,
-        senderCity: true, senderCountry: true, senderLatitude: true, senderLongitude: true,
+        senderAddress: true, senderCity: true, senderCountry: true, senderLatitude: true, senderLongitude: true,
+        receiverAddress: true,
         receiverCity: true, receiverCountry: true, receiverLatitude: true, receiverLongitude: true,
         estimatedDelivery: true, signedBy: true, deliveredAt: true,
         currentPosition: true,
