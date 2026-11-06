@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { z } from 'zod'
 import { isAdminRequest } from '../../src/lib/adminAuth.js'
 import { prisma } from '../../src/lib/prisma.js'
+import { geocodeLocation } from '../../src/lib/geocode.js'
 
 const statuses = ['LABEL_CREATED', 'COLLECTED', 'ORIGIN_GATEWAY', 'IN_TRANSIT', 'CUSTOMS_HOLD', 'CUSTOMS_CLEARED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'EXCEPTION'] as const
 const serviceTypes = ['EXPRESS_INTL', 'STANDARD_INTL', 'CARGO_FREIGHT', 'ECOMMERCE', 'BUSINESS_LOGISTICS', 'DOOR_TO_DOOR'] as const
@@ -52,10 +53,45 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const parsed = createSchema.safeParse(req.body)
       if (!parsed.success) return res.status(400).json({ error: 'Check the shipment details and try again.', details: parsed.error.flatten() })
       const input = parsed.data
+
+      let senderLat = input.senderLatitude
+      let senderLon = input.senderLongitude
+      if (senderLat == null || senderLon == null) {
+        const originGeo = await geocodeLocation(`${input.senderCity}, ${input.senderCountry}`)
+        if (originGeo) {
+          senderLat = originGeo.latitude
+          senderLon = originGeo.longitude
+        }
+      }
+
+      let receiverLat = input.receiverLatitude
+      let receiverLon = input.receiverLongitude
+      if (receiverLat == null || receiverLon == null) {
+        const destGeo = await geocodeLocation(`${input.receiverCity}, ${input.receiverCountry}`)
+        if (destGeo) {
+          receiverLat = destGeo.latitude
+          receiverLon = destGeo.longitude
+        }
+      }
+
       const shipment = await prisma.shipment.create({
         data: {
-          ...input, status: 'LABEL_CREATED',
-          events: { create: { status: 'LABEL_CREATED', location: `${input.senderCity}, ${input.senderCountry}`, facility: 'EMSXpress Admin', description: 'Shipment created by an administrator.', latitude: input.senderLatitude, longitude: input.senderLongitude } },
+          ...input,
+          senderLatitude: senderLat,
+          senderLongitude: senderLon,
+          receiverLatitude: receiverLat,
+          receiverLongitude: receiverLon,
+          status: 'LABEL_CREATED',
+          events: {
+            create: {
+              status: 'LABEL_CREATED',
+              location: `${input.senderCity}, ${input.senderCountry}`,
+              facility: 'EMSXpress Admin',
+              description: 'Shipment created by an administrator.',
+              latitude: senderLat,
+              longitude: senderLon,
+            },
+          },
         },
         select: { trackingNumber: true },
       })
@@ -66,26 +102,71 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const parsed = eventSchema.safeParse(req.body)
       if (!parsed.success) return res.status(400).json({ error: 'Check the scan details and try again.', details: parsed.error.flatten() })
       const input = parsed.data
+
+      // Geocode the new location if coordinates were not manually supplied
+      let finalLatitude = input.latitude
+      let finalLongitude = input.longitude
+      if (finalLatitude == null || finalLongitude == null) {
+        const geocoded = await geocodeLocation(input.location)
+        if (geocoded) {
+          finalLatitude = geocoded.latitude
+          finalLongitude = geocoded.longitude
+        }
+      }
+
       const result = await prisma.$transaction(async tx => {
         const shipment = await tx.shipment.findUnique({ where: { trackingNumber: input.trackingNumber } })
         if (!shipment) return null
-        await tx.trackingEvent.create({ data: {
-          shipmentId: shipment.id, status: input.status, location: input.location,
-          facility: input.facility, description: input.description,
-          latitude: input.latitude, longitude: input.longitude, timestamp: input.timestamp,
-        } })
-        return tx.shipment.update({
+
+        const event = await tx.trackingEvent.create({
+          data: {
+            shipmentId: shipment.id,
+            status: input.status,
+            location: input.location,
+            facility: input.facility,
+            description: input.description,
+            latitude: finalLatitude,
+            longitude: finalLongitude,
+            timestamp: input.timestamp ?? new Date(),
+          },
+        })
+
+        // Synchronize the shipment's current live position so maps everywhere reflect this new stop immediately
+        if (finalLatitude != null && finalLongitude != null) {
+          await tx.shipmentPosition.upsert({
+            where: { shipmentId: shipment.id },
+            create: {
+              shipmentId: shipment.id,
+              latitude: finalLatitude,
+              longitude: finalLongitude,
+              source: `Scan: ${input.location}`,
+              recordedAt: input.timestamp ?? new Date(),
+            },
+            update: {
+              latitude: finalLatitude,
+              longitude: finalLongitude,
+              source: `Scan: ${input.location}`,
+              recordedAt: input.timestamp ?? new Date(),
+            },
+          })
+        }
+
+        const updated = await tx.shipment.update({
           where: { id: shipment.id },
           data: {
             status: input.status,
+            updatedAt: new Date(),
             ...(input.estimatedDelivery ? { estimatedDelivery: input.estimatedDelivery } : {}),
             ...(input.status === 'DELIVERED' ? { deliveredAt: input.timestamp ?? new Date(), signedBy: input.signedBy || null } : {}),
           },
-          select: { trackingNumber: true, status: true },
+          select: { trackingNumber: true, status: true, updatedAt: true },
         })
+
+        return { shipment: updated, event }
       })
+
       if (!result) return res.status(404).json({ error: 'Shipment not found.' })
-      return res.status(200).json({ shipment: result })
+      return res.status(200).json({ shipment: result.shipment, event: result.event })
     }
 
     res.setHeader('Allow', 'GET, POST, PATCH')

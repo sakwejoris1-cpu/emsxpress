@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Activity, AlertTriangle, ArrowRight, Box, Check, ChevronRight, Clock3, LogOut, MapPin, PackageCheck, Plus, RefreshCw, Search, ShieldCheck, Truck } from 'lucide-react'
+import { Activity, AlertTriangle, ArrowRight, Box, Check, ChevronRight, Clock3, Compass, LogOut, MapPin, PackageCheck, Plus, RefreshCw, Search, ShieldCheck, Truck } from 'lucide-react'
 import { PageFrame } from '../Layout'
 import AdminOperations from './AdminOperations'
+import { findKnownCityCoordinates, geocodeLocation } from '../lib/geocode.js'
 import './admin.css'
 
 type EventRow = { id: string; status: string; location: string; facility: string | null; description: string; latitude: number | null; longitude: number | null; timestamp: string }
@@ -18,6 +19,8 @@ const services = ['EXPRESS_INTL', 'STANDARD_INTL', 'CARGO_FREIGHT', 'ECOMMERCE',
 const label = (value: string) => value.toLowerCase().replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase())
 const mapSrc = (lat: number, lon: number) => `https://www.openstreetmap.org/export/embed.html?bbox=${lon - 0.55}%2C${lat - 0.35}%2C${lon + 0.55}%2C${lat + 0.35}&layer=mapnik&marker=${lat}%2C${lon}`
 const addressMapSrc = (origin: string, destination: string) => `https://maps.google.com/maps?saddr=${encodeURIComponent(origin)}&daddr=${encodeURIComponent(destination)}&output=embed`
+const cityMapSrc = (city: string) => `https://maps.google.com/maps?q=${encodeURIComponent(city)}&output=embed`
+const routeWithStopMapSrc = (start: string, destination: string) => `https://maps.google.com/maps?saddr=${encodeURIComponent(start)}&daddr=${encodeURIComponent(destination)}&output=embed`
 const numberOrUndefined = (value: string) => value.trim() === '' ? undefined : Number(value)
 
 const blankShipment = {
@@ -41,6 +44,9 @@ export default function AdminPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [sharingLocation, setSharingLocation] = useState(false)
   const [locationMessage, setLocationMessage] = useState('')
+  const [mapView, setMapView] = useState<'stop' | 'route'>('stop')
+  const [geocoding, setGeocoding] = useState(false)
+  const [geoDetected, setGeoDetected] = useState(false)
   const locationWatch = useRef<number | null>(null)
   const lastPositionSentAt = useRef(0)
   const [shipmentForm, setShipmentForm] = useState(blankShipment)
@@ -96,10 +102,58 @@ export default function AdminPage() {
     setScan({
       status: selected.status,
       location: latest?.location ?? `${selected.senderCity}, ${selected.senderCountry}`,
-      facility: latest?.facility ?? '', description: '', latitude: latest?.latitude == null ? '' : String(latest.latitude),
-      longitude: latest?.longitude == null ? '' : String(latest.longitude), signedBy: selected.signedBy ?? '', estimatedDelivery: '',
+      facility: latest?.facility ?? '',
+      description: '',
+      latitude: latest?.latitude == null ? '' : String(latest.latitude),
+      longitude: latest?.longitude == null ? '' : String(latest.longitude),
+      signedBy: selected.signedBy ?? '',
+      estimatedDelivery: '',
     })
-  }, [selectedNumber, shipments])
+    setGeoDetected(false)
+  }, [selectedNumber])
+
+  const handleLocationChange = (newLocation: string) => {
+    const known = findKnownCityCoordinates(newLocation)
+    if (known) {
+      setScan(prev => ({
+        ...prev,
+        location: newLocation,
+        latitude: String(known.latitude),
+        longitude: String(known.longitude),
+      }))
+      setGeoDetected(true)
+    } else {
+      setScan(prev => ({
+        ...prev,
+        location: newLocation,
+        // clear old coordinates so the previous city's coordinates don't get accidentally retained
+        latitude: '',
+        longitude: '',
+      }))
+      setGeoDetected(false)
+    }
+  }
+
+  const handleLocationBlur = async () => {
+    const loc = scan.location.trim()
+    if (!loc) return
+    if (!scan.latitude || !scan.longitude) {
+      setGeocoding(true)
+      try {
+        const res = await geocodeLocation(loc)
+        if (res) {
+          setScan(prev => ({
+            ...prev,
+            latitude: String(res.latitude),
+            longitude: String(res.longitude),
+          }))
+          setGeoDetected(true)
+        }
+      } finally {
+        setGeocoding(false)
+      }
+    }
+  }
 
   const signIn = async (event: FormEvent) => {
     event.preventDefault(); setError(''); setBusy(true)
@@ -121,11 +175,30 @@ export default function AdminPage() {
   const createShipment = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError(''); setNotice('')
     const form = shipmentForm
+    let senderLat = numberOrUndefined(form.senderLatitude)
+    let senderLon = numberOrUndefined(form.senderLongitude)
+    if (senderLat === undefined || senderLon === undefined) {
+      const originGeo = await geocodeLocation(`${form.senderCity}, ${form.senderCountry}`)
+      if (originGeo) {
+        senderLat = originGeo.latitude
+        senderLon = originGeo.longitude
+      }
+    }
+    let receiverLat = numberOrUndefined(form.receiverLatitude)
+    let receiverLon = numberOrUndefined(form.receiverLongitude)
+    if (receiverLat === undefined || receiverLon === undefined) {
+      const destGeo = await geocodeLocation(`${form.receiverCity}, ${form.receiverCountry}`)
+      if (destGeo) {
+        receiverLat = destGeo.latitude
+        receiverLon = destGeo.longitude
+      }
+    }
+
     const body = {
       ...form, trackingNumber: form.trackingNumber.trim().toUpperCase(), weightKg: Number(form.weightKg),
       estimatedDelivery: form.estimatedDelivery || undefined,
-      senderLatitude: numberOrUndefined(form.senderLatitude), senderLongitude: numberOrUndefined(form.senderLongitude),
-      receiverLatitude: numberOrUndefined(form.receiverLatitude), receiverLongitude: numberOrUndefined(form.receiverLongitude),
+      senderLatitude: senderLat, senderLongitude: senderLon,
+      receiverLatitude: receiverLat, receiverLongitude: receiverLon,
     }
     try {
       const response = await fetch('/api/admin/shipments', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -141,18 +214,68 @@ export default function AdminPage() {
     event.preventDefault(); if (!selected) return
     if (scan.status === 'DELIVERED') stopLocationSharing()
     setBusy(true); setError(''); setNotice('')
+
+    let lat = numberOrUndefined(scan.latitude)
+    let lon = numberOrUndefined(scan.longitude)
+
+    // Ensure coordinates are resolved for the city if missing
+    if (lat === undefined || lon === undefined) {
+      const resolved = await geocodeLocation(scan.location)
+      if (resolved) {
+        lat = resolved.latitude
+        lon = resolved.longitude
+      }
+    }
+
     const body = {
       trackingNumber: selected.trackingNumber, status: scan.status, location: scan.location, facility: scan.facility || undefined,
-      description: scan.description, latitude: numberOrUndefined(scan.latitude), longitude: numberOrUndefined(scan.longitude),
+      description: scan.description, latitude: lat, longitude: lon,
       signedBy: scan.status === 'DELIVERED' ? scan.signedBy || undefined : undefined,
       estimatedDelivery: scan.estimatedDelivery || undefined,
     }
+
     try {
       const response = await fetch('/api/admin/shipments', { method: 'PATCH', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Could not record this shipment update.')
-      setNotice(`${selected.trackingNumber} updated to ${label(payload.shipment.status)}.`)
-      setScan(current => ({ ...current, description: '', estimatedDelivery: '' }))
+
+      const finalLat = payload.event?.latitude ?? lat ?? null
+      const finalLon = payload.event?.longitude ?? lon ?? null
+
+      const createdEvent: EventRow = {
+        id: payload.event?.id || `scan-${Date.now()}`,
+        status: scan.status,
+        location: scan.location,
+        facility: scan.facility || null,
+        description: scan.description,
+        latitude: finalLat,
+        longitude: finalLon,
+        timestamp: payload.event?.timestamp || new Date().toISOString(),
+      }
+
+      // Optimistic instant React state update so map & timeline re-render immediately
+      setShipments(current => current.map(item => {
+        if (item.trackingNumber !== selected.trackingNumber) return item
+        return {
+          ...item,
+          status: scan.status,
+          updatedAt: new Date().toISOString(),
+          signedBy: scan.status === 'DELIVERED' ? scan.signedBy || item.signedBy : item.signedBy,
+          events: [createdEvent, ...item.events.filter(e => e.id !== createdEvent.id)],
+        }
+      }))
+
+      setNotice(`${selected.trackingNumber} updated to ${label(payload.shipment.status)} at ${scan.location}.`)
+      setScan(current => ({
+        ...current,
+        description: '',
+        estimatedDelivery: '',
+        latitude: finalLat != null ? String(finalLat) : '',
+        longitude: finalLon != null ? String(finalLon) : '',
+      }))
+      setGeoDetected(false)
+
+      // Background sync with database
       await loadShipments()
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not update shipment.') }
     finally { setBusy(false) }
@@ -212,10 +335,12 @@ export default function AdminPage() {
   const exceptions = (counts.EXCEPTION ?? 0) + (counts.CUSTOMS_HOLD ?? 0)
   const delivered = counts.DELIVERED ?? 0
   const latest = selected?.events[0]
-  const mapLatitude = latest?.latitude ?? selected?.senderLatitude
-  const mapLongitude = latest?.longitude ?? selected?.senderLongitude
+  const hasLatestCoords = latest?.latitude != null && latest?.longitude != null
+  const mapLatitude = hasLatestCoords ? latest.latitude : selected?.senderLatitude
+  const mapLongitude = hasLatestCoords ? latest.longitude : selected?.senderLongitude
   const originAddress = selected ? [selected.senderAddress, selected.senderCity, selected.senderCountry].filter(Boolean).join(', ') : ''
   const destinationAddress = selected ? [selected.receiverAddress, selected.receiverCity, selected.receiverCountry].filter(Boolean).join(', ') : ''
+  const currentCityOrLocation = latest?.location || (selected ? `${selected.senderCity}, ${selected.senderCountry}` : '')
 
   return <PageFrame eyebrow="EMSXPRESS ADMIN" title={<>Operations,<br/><span>at a glance.</span></>} description="Manage your shipment records and publish scan updates to customer tracking.">
     <div className="admin-toolbar"><div className="admin-live"><i/> Admin session active <span>·</span> Data refreshes every 30 seconds</div><div><a className="admin-toolbar-link" href="/">Public site <ArrowRight size={14}/></a><button className="admin-toolbar-button" onClick={() => loadShipments().catch(cause => setError(cause.message))}><RefreshCw size={14}/> Refresh</button><button className="admin-toolbar-button" onClick={signOut}><LogOut size={14}/> Sign out</button></div></div>
@@ -233,7 +358,7 @@ export default function AdminPage() {
       <section className="admin-shipments portal-panel">
         <div className="admin-panel-heading"><div><span className="eyebrow"><span className="eyebrow-icon"><Activity size={14}/></span> SHIPMENT CONTROL</span><h2>All shipments <span>{total}</span></h2></div><button className="button button-accent small" onClick={() => { setShowCreate(value => !value); setError('') }}><Plus size={15}/>{showCreate ? 'Close form' : 'New shipment'}</button></div>
         {showCreate && <form className="admin-create" onSubmit={createShipment}>
-          <div className="admin-form-title"><b>Create shipment</b><small>Sender and receiver addresses are required. Map coordinates are optional.</small></div>
+          <div className="admin-form-title"><b>Create shipment</b><small>Sender and receiver addresses are required. Map coordinates are optional and auto-detected if left empty.</small></div>
           <div className="admin-form-grid">
             <label>TRACKING NUMBER<input required minLength={6} value={shipmentForm.trackingNumber} onChange={e => setShipmentForm({ ...shipmentForm, trackingNumber: e.target.value })} placeholder="Enter a tracking number"/></label>
             <label>SERVICE<select value={shipmentForm.serviceType} onChange={e => setShipmentForm({ ...shipmentForm, serviceType: e.target.value })}>{services.map(value => <option key={value} value={value}>{label(value)}</option>)}</select></label>
@@ -260,14 +385,84 @@ export default function AdminPage() {
         {!selected ? <div className="admin-empty-detail"><Box size={25}/><b>Select a shipment</b><span>Shipment details and scan controls will appear here.</span></div> : <>
           <div className="admin-detail-head"><span className={`status-pill status-${selected.status.toLowerCase()}`}><i/>{label(selected.status)}</span><h2>{selected.trackingNumber}</h2><p>{label(selected.serviceType)} · {selected.weightKg} kg</p></div>
           <div className="admin-route"><div><small>ORIGIN</small><b>{selected.senderCity}</b><span>{selected.senderCountry}</span></div><ArrowRight size={16}/><div><small>DESTINATION</small><b>{selected.receiverCity}</b><span>{selected.receiverCountry}</span></div></div>
-          <section className="admin-detail-map"><div className="admin-subhead"><b><MapPin size={14}/> {mapLatitude != null && mapLongitude != null ? 'Latest scan location' : 'Shipment route'}</b><small>{mapLatitude != null && mapLongitude != null ? 'Scan-based' : 'Address-based map'}</small></div>{mapLatitude != null && mapLongitude != null ? <iframe title={`Latest scan map for ${selected.trackingNumber}`} loading="lazy" src={mapSrc(mapLatitude, mapLongitude)}/> : originAddress && destinationAddress ? <iframe title={`Shipment route map for ${selected.trackingNumber}`} loading="lazy" src={addressMapSrc(originAddress, destinationAddress)}/> : <div className="admin-map-empty">Add addresses or scan coordinates to show a map location.</div>}<span>{mapLatitude != null && mapLongitude != null ? latest?.location ?? `${selected.senderCity}, ${selected.senderCountry}` : `${originAddress} → ${destinationAddress}`}</span></section>
+          
+          <section className="admin-detail-map">
+            <div className="admin-subhead">
+              <b><MapPin size={14}/> {mapView === 'route' ? 'Route progress' : hasLatestCoords ? 'Current scan location' : 'Latest location'}</b>
+              <div className="admin-map-toggle">
+                <button
+                  type="button"
+                  className={mapView === 'stop' ? 'active' : ''}
+                  onClick={() => setMapView('stop')}
+                  title="Show pin on the current stop"
+                >
+                  Current stop
+                </button>
+                <button
+                  type="button"
+                  className={mapView === 'route' ? 'active' : ''}
+                  onClick={() => setMapView('route')}
+                  title="Show route to destination"
+                >
+                  Route
+                </button>
+              </div>
+            </div>
+            {mapView === 'stop' ? (
+              hasLatestCoords ? (
+                <iframe title={`Latest scan map for ${selected.trackingNumber}`} loading="lazy" src={mapSrc(mapLatitude!, mapLongitude!)}/>
+              ) : currentCityOrLocation ? (
+                <iframe title={`Latest scan map for ${selected.trackingNumber}`} loading="lazy" src={cityMapSrc(currentCityOrLocation)}/>
+              ) : originAddress && destinationAddress ? (
+                <iframe title={`Shipment route map for ${selected.trackingNumber}`} loading="lazy" src={addressMapSrc(originAddress, destinationAddress)}/>
+              ) : (
+                <div className="admin-map-empty">Add addresses or scan coordinates to show a map location.</div>
+              )
+            ) : (
+              destinationAddress ? (
+                <iframe title={`Route map for ${selected.trackingNumber}`} loading="lazy" src={routeWithStopMapSrc(currentCityOrLocation || originAddress, destinationAddress)}/>
+              ) : (
+                <div className="admin-map-empty">Destination address required for route view.</div>
+              )
+            )}
+            <div className="admin-map-caption">
+              <span>{mapView === 'route' ? `${currentCityOrLocation} → ${destinationAddress}` : `${currentCityOrLocation}${hasLatestCoords ? ` (${latest?.latitude?.toFixed(4)}, ${latest?.longitude?.toFixed(4)})` : ''}`}</span>
+              {hasLatestCoords && (
+                <a href={`https://www.openstreetmap.org/?mlat=${latest?.latitude}&mlon=${latest?.longitude}#map=12/${latest?.latitude}/${latest?.longitude}`} target="_blank" rel="noreferrer">
+                  Open map <ArrowRight size={12}/>
+                </a>
+              )}
+            </div>
+          </section>
+
           <section className="admin-location-share"><div className="admin-subhead"><b><MapPin size={14}/> Live vehicle location</b><small>{sharingLocation ? 'Sharing' : 'On demand'}</small></div><p>Use a dispatcher or driver phone. Allow location access and keep this admin page open; customers see updates on their tracking page.</p>{locationMessage && <small className="admin-location-message">{locationMessage}</small>}{sharingLocation ? <button type="button" className="admin-toolbar-button stop-sharing" onClick={stopLocationSharing}>Stop location sharing</button> : <button type="button" className="button button-accent small" disabled={selected.status === 'DELIVERED'} onClick={startLocationSharing}>{selected.status === 'DELIVERED' ? 'Shipment delivered' : 'Start live location'}</button>}</section>
-          <form className="admin-scan-form" onSubmit={addScan}><div className="admin-subhead"><b><Activity size={14}/> Publish tracking update</b><small>Creates a timestamped scan</small></div>
+          
+          <form className="admin-scan-form" onSubmit={addScan}>
+            <div className="admin-subhead">
+              <b><Activity size={14}/> Publish tracking update</b>
+              <small>Creates next stop scan</small>
+            </div>
             <label>NEW STATUS<select required value={scan.status} onChange={e => setScan({ ...scan, status: e.target.value })}>{statuses.map(status => <option key={status} value={status}>{label(status)}</option>)}</select></label>
-            <label>LOCATION<input required value={scan.location} onChange={e => setScan({ ...scan, location: e.target.value })} placeholder="City, country or facility"/></label>
+            <label>
+              <span className="admin-label-row">
+                <span>LOCATION (NEXT CITY / STOP)</span>
+                {geocoding && <span className="admin-geo-pill">Looking up coordinates…</span>}
+                {geoDetected && !geocoding && <span className="admin-geo-pill"><Compass size={11}/> Auto-coordinates matched</span>}
+              </span>
+              <input
+                required
+                value={scan.location}
+                onChange={e => handleLocationChange(e.target.value)}
+                onBlur={handleLocationBlur}
+                placeholder="e.g. Chicago, IL or Frankfurt, Germany"
+              />
+            </label>
             <label>FACILITY<input value={scan.facility} onChange={e => setScan({ ...scan, facility: e.target.value })} placeholder="Gateway or service center"/></label>
             <label>SCAN DESCRIPTION<textarea required minLength={3} rows={3} value={scan.description} onChange={e => setScan({ ...scan, description: e.target.value })} placeholder="What happened at this scan?"/></label>
-            <div className="admin-coord-row"><label>LATITUDE<input type="number" step="any" value={scan.latitude} onChange={e => setScan({ ...scan, latitude: e.target.value })} placeholder="40.7128"/></label><label>LONGITUDE<input type="number" step="any" value={scan.longitude} onChange={e => setScan({ ...scan, longitude: e.target.value })} placeholder="-74.0060"/></label></div>
+            <div className="admin-coord-row">
+              <label>LATITUDE (AUTO-DETECTED)<input type="number" step="any" value={scan.latitude} onChange={e => setScan({ ...scan, latitude: e.target.value })} placeholder="e.g. 41.8781"/></label>
+              <label>LONGITUDE (AUTO-DETECTED)<input type="number" step="any" value={scan.longitude} onChange={e => setScan({ ...scan, longitude: e.target.value })} placeholder="e.g. -87.6298"/></label>
+            </div>
             {scan.status === 'DELIVERED' && <label>RECEIVED BY<input value={scan.signedBy} onChange={e => setScan({ ...scan, signedBy: e.target.value })} placeholder="Recipient name"/></label>}
             <label>UPDATE DELIVERY ESTIMATE <span className="admin-optional">OPTIONAL</span><input type="date" value={scan.estimatedDelivery} onChange={e => setScan({ ...scan, estimatedDelivery: e.target.value })}/></label>
             <button className="button button-accent" disabled={busy}>{busy ? 'Saving scan…' : 'Save shipment update'} <ArrowRight size={14}/></button>
